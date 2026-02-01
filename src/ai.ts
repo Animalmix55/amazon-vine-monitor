@@ -119,3 +119,69 @@ ${guidance}`;
 
   return appealing;
 }
+
+/**
+ * Given a top-level category name and list of subcategory names, use guidance.md
+ * to return which subcategories the user would find appealing (so we only scrape those).
+ * Returns the subset of subcategory names to scrape; if OpenAI is unavailable, returns all.
+ */
+export async function filterSubcategoriesByGuidance(
+  category: string,
+  subcategoryNames: string[]
+): Promise<string[]> {
+  if (subcategoryNames.length === 0) return [];
+
+  const guidance = loadGuidance();
+  if (!hasOpenAI()) {
+    console.warn("No OPENAI_API_KEY set; scraping all subcategories under " + category);
+    return subcategoryNames;
+  }
+
+  const openai = new OpenAI({ apiKey: config.openai.apiKey });
+  const list = subcategoryNames.map((n) => `- ${n}`).join("\n");
+
+  const sys = `You are a filter for Amazon Vine category preferences. The user has guidance for which kinds of products they like. Given a top-level category and its subcategories, reply with a JSON array of the subcategory NAMES that match the user's interests—only those they would want to browse. Reply with nothing else.
+
+Guidance from the user:
+${guidance}`;
+
+  const user = `Top-level category: "${category}"
+
+Subcategories:
+${list}
+
+Which of these subcategory names (exact names only) would the user find appealing to browse, given their guidance? Reply only with a JSON array of those names, e.g. ["Replacement Parts","Tools & Equipment"]. Include only names from the list above.`;
+
+  try {
+    const res = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: sys },
+        { role: "user", content: user },
+      ],
+      response_format: { type: "json_object" },
+    });
+    const content = res.choices[0]?.message?.content?.trim();
+    if (!content) return subcategoryNames;
+
+    let names: string[] = [];
+    try {
+      const parsed = JSON.parse(content);
+      if (Array.isArray(parsed)) names = parsed.map(String);
+      else if (parsed && typeof parsed === "object") names = parsed.subcategories ?? parsed.names ?? Object.values(parsed).flat();
+    } catch {
+      const match = content.match(/\[[\s\S]*?\]/);
+      if (match) names = JSON.parse(match[0]);
+    }
+
+    const validSet = new Set(subcategoryNames.map((n) => n.trim()));
+    const filtered = names.filter((n) => validSet.has(String(n).trim()));
+    if (filtered.length > 0) {
+      console.log(`[AI] Under "${category}": scraping ${filtered.length} of ${subcategoryNames.length} subcategories: ${filtered.join(", ")}`);
+    }
+    return filtered.length > 0 ? filtered : subcategoryNames;
+  } catch (e) {
+    console.error("OpenAI subcategory filter error:", e);
+    return subcategoryNames;
+  }
+}

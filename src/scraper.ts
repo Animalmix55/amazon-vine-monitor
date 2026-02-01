@@ -1,6 +1,16 @@
 import puppeteer, { Browser, Page } from "puppeteer";
 import { config } from "./config.js";
 import type { VineItem, VineTabId, TabCounts } from "./types.js";
+import { filterSubcategoriesByGuidance } from "./ai.js";
+import {
+  delayAfterTabSwitch,
+  delayBeforeCategory,
+  delayAfterCategory,
+  delayBeforeSubcategory,
+  delayAfterSubcategory,
+  delayBeforePagination,
+  delayAfterPagination,
+} from "./humanDelay.js";
 
 const VINE_URL = "https://www.amazon.com/vine/vine-items";
 
@@ -231,7 +241,7 @@ async function openTabAndGetCount(
     }
     return false;
   }, tabText);
-  if (clicked) await wait(2000);
+  if (clicked) await delayAfterTabSwitch();
 
   return getTotalCount(page);
 }
@@ -243,6 +253,8 @@ async function getCurrentTabCount(page: Page): Promise<number> {
 
 /** Try to go to the next page of results; return true if we moved. Logs when no more pages. */
 async function goToNextPage(page: Page): Promise<boolean> {
+  await delayBeforePagination();
+
   const selectors = [
     'a.s-pagination-next:not(.s-pagination-disabled)',
     '.s-pagination-next a:not(.s-pagination-disabled)',
@@ -255,9 +267,9 @@ async function goToNextPage(page: Page): Promise<boolean> {
     const el = await page.$(sel);
     if (el) {
       await el.evaluate((e: Element) => (e as HTMLElement).scrollIntoView({ block: "center" }));
-      await wait(300);
+      await wait(200);
       await el.click();
-      await wait(2500);
+      await delayAfterPagination();
       return true;
     }
   }
@@ -273,7 +285,7 @@ async function goToNextPage(page: Page): Promise<boolean> {
     return false;
   });
   if (clicked) {
-    await wait(2500);
+    await delayAfterPagination();
     return true;
   }
   // URL-based: Vine uses /vine/vine-items?queue=...&pn=&cn=&page=N — preserve query, increment page
@@ -288,12 +300,195 @@ async function goToNextPage(page: Page): Promise<boolean> {
     if (nextUrl !== url) {
       console.log(`[pagination] Navigating to page ${nextNum} via URL.`);
       await page.goto(nextUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
-      await wait(2000);
+      await delayAfterPagination();
       return true;
     }
   }
   console.log("[pagination] No more pages: no Next link/button and URL has no next page param.");
   return false;
+}
+
+/** Fisher–Yates shuffle (in place). */
+function shuffle<T>(arr: T[]): T[] {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+const VVP_BROWSE_NODES = "#vvp-browse-nodes-container";
+
+/** Top-level category from filter: name and parent node id (pn). */
+export interface CategoryNode {
+  name: string;
+  pn: string;
+}
+
+/** Subcategory under a selected parent: name and child node id (cn). */
+export interface SubcategoryNode {
+  name: string;
+  cn: string;
+}
+
+/**
+ * Parse the Vine category filter (#vvp-browse-nodes-container) for all top-level
+ * categories (div.parent-node). Call when on Additional items tab.
+ */
+export async function getTopLevelCategories(page: Page): Promise<CategoryNode[]> {
+  const list = await page.evaluate((containerSel: string) => {
+    const container = document.querySelector(containerSel);
+    if (!container) return [];
+    const parents = container.querySelectorAll("div.parent-node");
+    const result: { name: string; pn: string }[] = [];
+    parents.forEach((div) => {
+      const a = div.querySelector("a[href*='pn=']");
+      if (!a) return;
+      const href = (a as HTMLAnchorElement).getAttribute("href") ?? "";
+      const m = href.match(/[?&]pn=(\d+)/);
+      if (!m) return;
+      const name = (a as HTMLElement).textContent?.trim() ?? "";
+      if (name) result.push({ name, pn: m[1] });
+    });
+    return result;
+  }, VVP_BROWSE_NODES);
+  return list;
+}
+
+/**
+ * Parse subcategories for the currently selected parent (a.selectedNode).
+ * Following siblings that are div.child-node are returned. Call after navigating
+ * to a category (pn=XXX) on Additional items.
+ */
+export async function getSubcategories(page: Page): Promise<SubcategoryNode[]> {
+  const list = await page.evaluate((containerSel: string) => {
+    const container = document.querySelector(containerSel);
+    if (!container) return [];
+    const selected = container.querySelector("a.selectedNode");
+    if (!selected) return [];
+    const parentDiv = selected.closest("div.parent-node");
+    if (!parentDiv) return [];
+    const result: { name: string; cn: string }[] = [];
+    let next: Element | null = parentDiv.nextElementSibling;
+    while (next) {
+      if (next.classList.contains("parent-node")) break;
+      if (next.classList.contains("child-node")) {
+        const a = next.querySelector("a[href*='cn=']");
+        if (a) {
+          const href = (a as HTMLAnchorElement).getAttribute("href") ?? "";
+          const m = href.match(/[?&]cn=(\d+)/);
+          if (m) {
+            const name = (a as HTMLElement).textContent?.trim() ?? "";
+            if (name) result.push({ name, cn: m[1] });
+          }
+        }
+      }
+      next = next.nextElementSibling;
+    }
+    return result;
+  }, VVP_BROWSE_NODES);
+  return list;
+}
+
+/**
+ * Smart collection for Additional items: open category filter, get top-level categories
+ * (shuffled), then for each category get subcategories and use AI to pick which to scrape.
+ * Only scrapes those subcategories (or the parent if none match). Falls back to
+ * collectAllItemsInTab if the filter container is not present.
+ */
+async function collectAdditionalItemsSmart(
+  page: Page,
+  tab: VineTabId,
+  totalCount: number,
+  maxItemsForTab: number | undefined,
+  onItemsCollected?: (items: VineItem[]) => void
+): Promise<VineItem[]> {
+  await delayAfterTabSwitch();
+  const hasFilter = await page.$(VVP_BROWSE_NODES).then((el) => !!el);
+  if (!hasFilter) {
+    console.log("[Additional] No category filter found; scraping entire Additional tab.");
+    return collectAllItemsInTab(page, tab, totalCount, maxItemsForTab, onItemsCollected);
+  }
+
+  let categories = await getTopLevelCategories(page);
+  if (categories.length === 0) {
+    console.log("[Additional] No top-level categories in filter; scraping entire Additional tab.");
+    return collectAllItemsInTab(page, tab, totalCount, maxItemsForTab, onItemsCollected);
+  }
+
+  shuffle(categories);
+  console.log(`[Additional] Smart mode: ${categories.length} top-level categories (shuffled), filtering subcategories by guidance.`);
+
+  const all: VineItem[] = [];
+  const seenAsins = new Set<string>();
+
+  for (const cat of categories) {
+    if (maxItemsForTab != null && all.length >= maxItemsForTab) break;
+
+    const baseUrl = `${VINE_URL}?queue=encore&pn=${cat.pn}`;
+    await page.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+    await wait(2000);
+
+    const subs = await getSubcategories(page);
+    let toScrape: SubcategoryNode[] = [];
+    let scrapeParentOnly = false;
+
+    if (subs.length === 0) {
+      scrapeParentOnly = true;
+    } else {
+      const filteredNames = await filterSubcategoriesByGuidance(cat.name, subs.map((s) => s.name));
+      toScrape = subs.filter((s) => filteredNames.includes(s.name));
+      if (toScrape.length === 0) toScrape = shuffle([...subs]).slice(0, 3);
+      else shuffle(toScrape);
+    }
+
+    if (scrapeParentOnly) {
+      const count = await getTotalCount(page);
+      const budget = maxItemsForTab != null ? Math.max(0, maxItemsForTab - all.length) : undefined;
+      const onBatch = onItemsCollected
+        ? (items: VineItem[]) => {
+            const newOnes = items.filter((it) => !seenAsins.has(it.asin));
+            newOnes.forEach((it) => seenAsins.add(it.asin));
+            if (newOnes.length) onItemsCollected(newOnes);
+          }
+        : undefined;
+      const items = await collectAllItemsInTab(page, tab, count, budget, onBatch);
+      for (const it of items) {
+        if (!seenAsins.has(it.asin)) {
+          seenAsins.add(it.asin);
+          all.push(it);
+        }
+      }
+      continue;
+    }
+
+    for (const sub of toScrape) {
+      if (maxItemsForTab != null && all.length >= maxItemsForTab) break;
+      await delayBeforeSubcategory();
+      const subUrl = `${VINE_URL}?queue=encore&pn=${cat.pn}&cn=${sub.cn}`;
+      await page.goto(subUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+      await delayAfterSubcategory();
+      const count = await getTotalCount(page);
+      const budget = maxItemsForTab != null ? Math.max(0, maxItemsForTab - all.length) : undefined;
+      const onBatch = onItemsCollected
+        ? (items: VineItem[]) => {
+            const newOnes = items.filter((it) => !seenAsins.has(it.asin));
+            newOnes.forEach((it) => seenAsins.add(it.asin));
+            if (newOnes.length) onItemsCollected(newOnes);
+          }
+        : undefined;
+      const items = await collectAllItemsInTab(page, tab, count, budget, onBatch);
+      for (const it of items) {
+        if (!seenAsins.has(it.asin)) {
+          seenAsins.add(it.asin);
+          all.push(it);
+        }
+      }
+    }
+  }
+
+  console.log(`[Additional] Smart collection done: ${all.length} item(s).`);
+  return all;
 }
 
 /** Paginate through current tab and collect all items. Stops if a page has no new items (escape) or when maxItemsForTab reached. */
@@ -440,13 +635,22 @@ export async function runScraper(browser: Browser, options?: ScraperOptions): Pr
               }
             }
           : undefined;
-        const items = await collectAllItemsInTab(
-          page,
-          tab,
-          count,
-          maxItemsThisTab,
-          onItemsCollected
-        );
+        const items =
+          tab === "additional"
+            ? await collectAdditionalItemsSmart(
+                page,
+                tab,
+                count,
+                maxItemsThisTab,
+                onItemsCollected
+              )
+            : await collectAllItemsInTab(
+                page,
+                tab,
+                count,
+                maxItemsThisTab,
+                onItemsCollected
+              );
         itemsByTab[tab] = items;
         totalCollected += items.length;
       }
