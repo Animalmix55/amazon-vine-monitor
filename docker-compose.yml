@@ -1,0 +1,14 @@
+services:
+  mongodb:
+    image: mongo:7
+    container_name: vine-monitor-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - vine-mongodb-data:/data/db
+    environment:
+      MONGO_INITDB_DATABASE: vine_monitor
+
+volumes:
+  vine-mongodb-data:
