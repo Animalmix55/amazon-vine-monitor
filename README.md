@@ -48,7 +48,7 @@ Node.js (TypeScript) app that scrapes [Amazon Vine](https://www.amazon.com/vine/
 
 4. **Guidance**
 
-   Edit `guidance.md` with what you find appealing (categories, what to skip, deal-breakers). The AI uses this to decide which new items to include in the batched email.
+   Edit `guidance.md` with what you find appealing. The AI uses this file when scoring new Vine items; only the file contents are sent to OpenAI (keep it concise to reduce tokens). See **Guidance file** below for what to include.
 
 ## Usage
 
@@ -73,6 +73,19 @@ Node.js (TypeScript) app that scrapes [Amazon Vine](https://www.amazon.com/vine/
 6. It saves all items to MongoDB and marks which ASINs were suggested so they won’t be suggested again.
 
 **Session reuse:** The browser uses a persistent profile (`.browser-data/`) so cookies and login state are saved between runs. You sign in once; later runs reuse the session and avoid repeated logins (fewer red flags with Amazon).
+
+## Guidance file (guidance.md)
+
+Use `guidance.md` to tell the AI what kinds of Vine items you find appealing. The monitor sends a single batched email per scan only for items that match this guidance. **Keep the file to your preferences only**—template text lives in this README so it isn’t sent to OpenAI.
+
+**What to include:**
+
+- **Categories you like**: e.g. kitchen gadgets, books, electronics, tools, outdoor gear.
+- **What to avoid**: junk, supplements, low-quality brands, redundant items, things you’d never use.
+- **Deal-breakers**: e.g. “never suggest baby products”, “skip clothing”, “no dietary supplements”.
+- **Nice-to-haves**: e.g. “prefer brand names”, “interested in eco-friendly products”, “like unique or unusual items”.
+
+Edit `guidance.md` to match your preferences; the AI will use it when scoring new Vine items and when filtering subcategories on the Additional tab.
 
 ## Tokens per request (OpenAI, worst case)
 

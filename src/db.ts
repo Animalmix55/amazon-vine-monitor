@@ -4,6 +4,7 @@ import type { VineItemRecord, TabCounts } from "./types.js";
 
 const COLLECTION = "vine_items";
 const COUNTS_DOC_ID = "last_tab_counts";
+const CATEGORY_COUNTS_COLLECTION = "category_counts";
 
 let client: MongoClient | null = null;
 
@@ -19,10 +20,123 @@ export function getVineCollection(): Promise<Collection<VineItemRecord>> {
   return getDb().then((db) => db.collection<VineItemRecord>(COLLECTION));
 }
 
-/** Ensure unique index on asin so we upsert by product. */
+/** Format a category count key: categoryId for category-only, "categoryId|subcategoryId" for subcategory. */
+export function formatCategoryKey(categoryId: string, subcategoryId?: string | null): string {
+  return subcategoryId == null || subcategoryId === "" ? categoryId : `${categoryId}|${subcategoryId}`;
+}
+
+interface SubcategoryCount {
+  cn: string;
+  name?: string;
+  count: number;
+}
+
+/** One doc per top-level category; subcategories stored as array. */
+interface CategoryCountDoc {
+  pn: string;
+  /** Category name for reference. */
+  name?: string;
+  /** Parent-only count (when we scraped the category without a sub). */
+  count?: number;
+  updatedAt: Date;
+  subcategories: SubcategoryCount[];
+}
+
+/** Get all stored category/subcategory counts. Key = formatCategoryKey(categoryId, subcategoryId). */
+export async function getCategoryCounts(): Promise<Map<string, number>> {
+  const db = await getDb();
+  const col = db.collection<CategoryCountDoc>(CATEGORY_COUNTS_COLLECTION);
+  const docs = await col.find({}).toArray();
+  const map = new Map<string, number>();
+  for (const d of docs) {
+    if (d.count != null) map.set(d.pn, d.count);
+    for (const sub of d.subcategories ?? []) {
+      map.set(formatCategoryKey(d.pn, sub.cn), sub.count);
+    }
+  }
+  return map;
+}
+
+/** Save last-seen item count (and optional name) for a category or subcategory. */
+export async function setCategoryCount(
+  categoryId: string,
+  subcategoryId: string | null | undefined,
+  count: number,
+  name?: string
+): Promise<void> {
+  const db = await getDb();
+  const col = db.collection<CategoryCountDoc>(CATEGORY_COUNTS_COLLECTION);
+  const now = new Date();
+
+  if (subcategoryId == null || subcategoryId === "") {
+    await col.updateOne(
+      { pn: categoryId },
+      {
+        $set: { pn: categoryId, count, updatedAt: now, ...(name != null && name !== "" ? { name } : {}) },
+        $setOnInsert: { subcategories: [] },
+      },
+      { upsert: true }
+    );
+    return;
+  }
+
+  const doc = await col.findOne({ pn: categoryId });
+  const subs = doc?.subcategories ?? [];
+  const existing = subs.find((s) => s.cn === subcategoryId);
+  const subEntry = { cn: subcategoryId, count, ...(name != null && name !== "" ? { name } : {}) };
+  const newSubs = existing
+    ? subs.map((s) => (s.cn === subcategoryId ? subEntry : s))
+    : [...subs, subEntry];
+
+  await col.updateOne(
+    { pn: categoryId },
+    { $set: { pn: categoryId, subcategories: newSubs, updatedAt: now } },
+    { upsert: true }
+  );
+}
+
+/**
+ * Remove categories/subcategories not in the given keys (e.g. no longer on page).
+ * - Deletes whole category docs whose categoryId is not in seenCategoryKeys.
+ * - For categories we visited this scan, sets subcategories to only those in seenCategoryKeys.
+ * - For categories we did not visit, clears subcategories to [].
+ */
+export async function clearCategoryCountsNotIn(
+  seenCategoryKeys: Set<string>,
+  visitedCategoryIds: Set<string>
+): Promise<void> {
+  if (seenCategoryKeys.size === 0) return;
+  const db = await getDb();
+  const col = db.collection<CategoryCountDoc>(CATEGORY_COUNTS_COLLECTION);
+  const validCategoryIds = new Set<string>();
+  for (const key of seenCategoryKeys) {
+    validCategoryIds.add(key.includes("|") ? key.split("|")[0]! : key);
+  }
+
+  await col.deleteMany({ pn: { $nin: Array.from(validCategoryIds) } });
+
+  const docs = await col.find({ pn: { $in: Array.from(validCategoryIds) } }).toArray();
+  for (const d of docs) {
+    const subs = d.subcategories ?? [];
+    const kept = visitedCategoryIds.has(d.pn)
+      ? subs.filter((s) => seenCategoryKeys.has(formatCategoryKey(d.pn, s.cn)))
+      : [];
+    if (kept.length !== subs.length) {
+      await col.updateOne(
+        { pn: d.pn },
+        { $set: { subcategories: kept, updatedAt: new Date() } }
+      );
+    }
+  }
+}
+
+/** Ensure unique index on asin; category_counts keyed by pn only. */
 export async function ensureIndexes() {
   const col = await getVineCollection();
   await col.createIndex({ asin: 1 }, { unique: true });
+  const db = await getDb();
+  const catCol = db.collection<CategoryCountDoc>(CATEGORY_COUNTS_COLLECTION);
+  await catCol.createIndex({ pn: 1 }, { unique: true });
 }
 
 /** Upsert item; if it already exists, only update suggestedAt when we send a suggestion. */
@@ -75,11 +189,20 @@ export async function getSuggestedAsins(asins: string[]): Promise<Set<string>> {
   return new Set(docs.map((d) => d.asin));
 }
 
-/** Get all asins we have ever seen (to avoid re-suggesting). */
+/** Get all asins we have ever seen (to avoid re-suggesting). Returns stored case; callers should compare case-insensitively when needed. */
 export async function getSeenAsins(): Promise<Set<string>> {
   const col = await getVineCollection();
   const docs = await col.find({}).project({ asin: 1 }).toArray();
   return new Set(docs.map((d) => d.asin));
+}
+
+/** For a batch of ASINs, return which ones exist in the collection (uppercase). Use this instead of getSeenAsins() when you only need to check specific ASINs. */
+export async function getSeenAsinsFromBatch(desired: string[]): Promise<Set<string>> {
+  if (desired.length === 0) return new Set();
+  const upper = [...new Set(desired.map((a) => String(a).toUpperCase()))];
+  const col = await getVineCollection();
+  const docs = await col.find({ asin: { $in: upper } }).project({ asin: 1 }).toArray();
+  return new Set(docs.map((d) => d.asin.toUpperCase()));
 }
 
 /** Persist items from a scan; mark which ones were suggested in this batch. */
@@ -87,9 +210,9 @@ export async function saveScanItems(
   items: Array<Omit<VineItemRecord, "suggestedAt">>,
   suggestedAsins: string[]
 ): Promise<void> {
-  const suggestedSet = new Set(suggestedAsins);
+  const suggestedSet = new Set(suggestedAsins.map((a) => a.toUpperCase()));
   for (const item of items) {
-    await upsertItem(item, suggestedSet.has(item.asin));
+    await upsertItem(item, suggestedSet.has(item.asin.toUpperCase()));
   }
 }
 
@@ -117,11 +240,12 @@ export async function getLastTabCounts(): Promise<TabCounts | null> {
   return doc?.counts ?? null;
 }
 
-/** Clear vine_items and meta (for a clean run). */
+/** Clear vine_items, meta, and category_counts (for a clean run). */
 export async function clearDb(): Promise<void> {
   const db = await getDb();
   await db.collection(COLLECTION).deleteMany({});
   await db.collection<MetaDoc>("meta").deleteMany({});
+  await db.collection(CATEGORY_COUNTS_COLLECTION).deleteMany({});
 }
 
 export async function closeDb(): Promise<void> {

@@ -1,5 +1,6 @@
 import { readFileSync, existsSync } from "fs";
-import { join, dirname } from "path";
+import { appendFile } from "fs/promises";
+import { join, dirname, isAbsolute } from "path";
 import { fileURLToPath } from "url";
 import OpenAI from "openai";
 import { config } from "./config.js";
@@ -7,6 +8,44 @@ import type { VineItem } from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const GUIDANCE_PATH = join(__dirname, "..", "guidance.md");
+
+function openaiLogPath(): string {
+  const p = config.openai.logPath.trim();
+  return p && isAbsolute(p) ? p : join(process.cwd(), p || "openai.log");
+}
+
+async function logOpenAI(
+  inquiry: string,
+  systemPrompt: string,
+  userPrompt: string,
+  response: string,
+  result: unknown,
+  usage?: { prompt_tokens?: number; completion_tokens?: number }
+): Promise<void> {
+  const path = openaiLogPath();
+  const ts = new Date().toISOString();
+  const usageStr = usage
+    ? `\nusage: prompt_tokens=${usage.prompt_tokens ?? "?"}, completion_tokens=${usage.completion_tokens ?? "?"}`
+    : "";
+  const block = [
+    `\n--- ${ts} [${inquiry}] ---`,
+    "\n[SYSTEM]",
+    systemPrompt,
+    "\n[USER]",
+    userPrompt,
+    "\n[RESPONSE]",
+    response,
+    "\n[PARSED RESULT]",
+    JSON.stringify(result),
+    usageStr,
+    "\n",
+  ].join("\n");
+  try {
+    await appendFile(path, block, "utf-8");
+  } catch (e) {
+    console.error("Failed to write openai.log:", e);
+  }
+}
 
 function loadGuidance(): string {
   const path = join(process.cwd(), "guidance.md");
@@ -92,10 +131,6 @@ ${guidance}`;
         ],
         response_format: { type: "json_object" },
       });
-      const usage = res.usage;
-      if (usage) {
-        console.log(`OpenAI batch ${Math.floor(i / batchSize) + 1}: ${usage.prompt_tokens} in, ${usage.completion_tokens} out`);
-      }
       const content = res.choices[0]?.message?.content?.trim();
       if (!content) continue;
       let asins: string[] = [];
@@ -107,16 +142,30 @@ ${guidance}`;
         const match = content.match(/\[[\s\S]*?\]/);
         if (match) asins = JSON.parse(match[0]);
       }
-      const valid = batch.map((it) => it.asin);
+      const validUpper = new Set(batch.map((it) => it.asin.toUpperCase()));
+      let batchAppealing = 0;
       for (const a of asins) {
         const asin = String(a).toUpperCase().trim();
-        if (asin.length === 10 && valid.includes(asin)) appealing.push(asin);
+        if (asin.length === 10 && validUpper.has(asin)) {
+          appealing.push(asin);
+          batchAppealing++;
+        }
       }
+      const batchNum = Math.floor(i / batchSize) + 1;
+      await logOpenAI(
+        `scoreAppeal batch ${batchNum}`,
+        sys,
+        user,
+        content,
+        { asins, batchAppealing, batchSize: batch.length },
+        res.usage ?? undefined
+      );
     } catch (e) {
       console.error("OpenAI appeal scoring error:", e);
     }
   }
 
+  console.debug(`scoreAppeal: ${appealing.length} appealing of ${toScore.length} total`);
   return appealing;
 }
 
@@ -176,10 +225,16 @@ Which of these subcategory names (exact names only) would the user find appealin
 
     const validSet = new Set(subcategoryNames.map((n) => n.trim()));
     const filtered = names.filter((n) => validSet.has(String(n).trim()));
-    if (filtered.length > 0) {
-      console.log(`[AI] Under "${category}": scraping ${filtered.length} of ${subcategoryNames.length} subcategories: ${filtered.join(", ")}`);
-    }
-    return filtered.length > 0 ? filtered : subcategoryNames;
+    await logOpenAI(
+      "filterSubcategories",
+      sys,
+      user,
+      content ?? "",
+      { category, subcategoryNames, filtered, subcategoryCount: filtered.length },
+      res.usage ?? undefined
+    );
+    console.debug(`filterSubcategories "${category}": ${filtered.length} appealing of ${subcategoryNames.length} total`);
+    return filtered;
   } catch (e) {
     console.error("OpenAI subcategory filter error:", e);
     return subcategoryNames;

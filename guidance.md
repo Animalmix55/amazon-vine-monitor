@@ -1,19 +1,34 @@
-# Vine item appeal guidance
+# Vine filter guidance
 
-Use this file to tell the AI what kinds of Amazon Vine items you find appealing. The monitor will send you a single batched email per scan only for items that match this guidance.
+## Profile
+- Demographics: 26, software engineer
+- Sizes: men's M shirts, 32x30 pants
 
-## What to include
+## Interests (parts/accessories OK only for these)
+- 3D printing: FlashForge Finder
+- Computing: desktop, HP ZBook 15
+- Smart home: Amazon Echos, Google Nest Audios
+- Vinyl: Fluance turntable
+- Outdoors: hiking, climbing (indoor), running, camping
+- Home improvement: DeWalt power tools (accessories OK; no parts)
+- Electrical: DIY electrical work — electrical tools, receptacles, romex, gang boxes, fixtures
 
-- **Categories you like**: e.g. kitchen gadgets, books, electronics, tools, outdoor gear.
-- **What to avoid**: junk, supplements, low-quality brands, redundant items, things you’d never use.
-- **Deal-breakers**: e.g. “never suggest baby products”, “skip clothing”, “no dietary supplements”.
-- **Nice-to-haves**: e.g. “prefer brand names”, “interested in eco-friendly products”, “like unique or unusual items”.
+## Context
+- Car: 2014 Buick Encore — accessories OK (organizers, mounts); no parts
+- Printer: HP OfficeJet 3830, 63XL ink
+- Hot tub: FC-0359 filter — filters + accessories OK; no other parts
+- Household: 4 cats; baby (born 1/5/26); wife ICU nurse
 
-## Example
+## Want
+- Cat/pet, baby, household, nurse-adjacent (if practical)
+- Smart home, outdoor/camping/hiking/running/climbing gear
+- Hot tub filters and accessories
+- Clothing in size above
+- DeWalt power tool accessories (no parts)
+- Electrical tools and DIY electrical: receptacles, romex, gang boxes, fixtures
 
-- I’m interested in: kitchen tools, small electronics, office supplies, and hobby/craft items.
-- Skip: supplements, beauty/skincare, baby/kids, clothing, and generic phone accessories.
-- Prefer items that look useful and well-made; avoid obvious junk or no-name brands.
-- I’m fine with household and pet items if they look practical.
-
-Edit this file to match your preferences; the AI will use it when scoring new Vine items.
+## Reject
+- Replacement parts (any domain)
+- Automotive parts or replacement parts
+- Parts for anything outside career/hobbies above
+- Junk, supplements, low-quality or no-name brands

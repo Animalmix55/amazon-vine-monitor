@@ -5,12 +5,15 @@ import {
   getLastTabCounts,
   saveLastTabCounts,
   saveScanItems,
-  getSeenAsins,
+  getSeenAsinsFromBatch,
+  setCategoryCount,
+  clearCategoryCountsNotIn,
   closeDb,
 } from "./db.js";
 import { runScraper, fetchTabCounts } from "./scraper.js";
 import { scoreAppeal } from "./ai.js";
 import { sendBatchedRecommendation } from "./email.js";
+import { logRecommendations } from "./recommendationLog.js";
 import { config } from "./config.js";
 import type { TabCounts, VineItem } from "./types.js";
 
@@ -28,45 +31,55 @@ function anyCountIncreased(prev: TabCounts | null, curr: TabCounts): boolean {
 
 async function runFullScan(browser: puppeteer.Browser): Promise<void> {
   console.log("Running full Vine scan...");
-  const seen = await getSeenAsins();
-  const appealingPromises: Promise<string[]>[] = [];
-  const { tabCounts, allItems, remainderNewItems } = await runScraper(browser, {
+  const getSeenAsins = (desired: string[]) => getSeenAsinsFromBatch(desired);
+  const { tabCounts, allItems, appealingAsins = [], newItemsCount = 0, pendingCategoryUpdates, seenCategoryKeys, visitedCategoryIds } = await runScraper(browser, {
     maxItems: config.aiMaxItemsPerRun,
-    seen,
+    getSeenAsins,
+    onBatchProcessed: (batch: VineItem[]) => scoreAppeal(batch),
     batchSize: config.aiBatchSize,
-    onBatchNewItems: (batch) => {
-      appealingPromises.push(scoreAppeal(batch));
-    },
   });
   await saveLastTabCounts(tabCounts);
 
-  if (allItems.length === 0) {
+  const allItemsArr = Object.values(allItems);
+  if (allItemsArr.length === 0) {
     console.log("No items found this scan.");
     return;
   }
 
-  const newItemsCount = allItems.filter((it) => !seen.has(it.asin)).length;
-  if (newItemsCount === 0) {
+  if (newItemsCount === 0 && appealingAsins.length === 0) {
     console.log("No new items; saving existing items and counts.");
-    await saveScanItems(allItems, []);
+    await saveScanItems(allItemsArr, []);
     return;
   }
 
-  const batchResults = await Promise.all(appealingPromises);
-  let appealingAsins = batchResults.flat();
-  if (remainderNewItems.length > 0) {
-    const remainderAppealing = await scoreAppeal(remainderNewItems);
-    appealingAsins = [...appealingAsins, ...remainderAppealing];
+  const appealingItems = appealingAsins
+    .map((a) => allItems[String(a).toUpperCase().trim()])
+    .filter((it): it is VineItem => it != null);
+  const missingAsins = appealingAsins.filter(
+    (a) => !allItems[String(a).toUpperCase().trim()]
+  );
+  if (missingAsins.length > 0) {
+    console.warn(
+      `AI returned ${missingAsins.length} appealing ASIN(s) not in scraped items: ${[...new Set(missingAsins.map((a) => a.toUpperCase()))].join(", ")}`
+    );
   }
-  const appealingItems = allItems.filter((it) => appealingAsins.includes(it.asin));
-  console.log(`${appealingItems.length} of ${newItemsCount} new item(s) are appealing.`);
+  console.log(`${appealingItems.length} of ${newItemsCount} new item(s) are appealing (${appealingAsins.length} ASINs from AI).`);
 
   if (appealingItems.length > 0) {
+    await logRecommendations(appealingItems);
     console.log(`Sending batched email for ${appealingItems.length} appealing item(s).`);
     await sendBatchedRecommendation(appealingItems);
   }
 
-  await saveScanItems(allItems, appealingAsins);
+  await saveScanItems(allItemsArr, appealingAsins);
+
+  if (pendingCategoryUpdates != null && seenCategoryKeys != null && visitedCategoryIds != null) {
+    for (const u of pendingCategoryUpdates) {
+      await setCategoryCount(u.categoryId, u.subcategoryId, u.count, u.name);
+    }
+    await clearCategoryCountsNotIn(seenCategoryKeys, visitedCategoryIds);
+  }
+
   console.log("Scan complete.");
 }
 

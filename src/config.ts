@@ -20,6 +20,8 @@ export const config = {
   },
   openai: {
     apiKey: process.env["OPENAI_API_KEY"] ?? "",
+    /** Path for AI request/response log (prompts + results). Set OPENAI_LOG_PATH in .env; default openai.log in cwd. */
+    logPath: optionalEnv("OPENAI_LOG_PATH", "openai.log"),
   },
   /** Items per OpenAI request (larger = fewer requests; gpt-4o-mini handles 500+ fine). */
   aiBatchSize: Math.min(500, Math.max(10, parseInt(optionalEnv("AI_BATCH_SIZE", "50"), 10) || 50)),
