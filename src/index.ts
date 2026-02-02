@@ -32,10 +32,16 @@ function anyCountIncreased(prev: TabCounts | null, curr: TabCounts): boolean {
 async function runFullScan(browser: puppeteer.Browser): Promise<void> {
   console.log("Running full Vine scan...");
   const getSeenAsins = (desired: string[]) => getSeenAsinsFromBatch(desired);
-  const { tabCounts, unseenItems, appealingAsins = [], newItemsCount = 0, pendingCategoryUpdates, seenCategoryKeys, visitedCategoryIds } = await runScraper(browser, {
+  const appealingAsins: string[] = [];
+  let newItemsCount = 0;
+  const { tabCounts, unseenItems, pendingCategoryUpdates, seenCategoryKeys, visitedCategoryIds } = await runScraper(browser, {
     maxItems: config.aiMaxItemsPerRun,
     getSeenAsins,
-    onBatchProcessed: (batch: VineItem[]) => scoreAppeal(batch),
+    onBatchProcessed: async (batch: VineItem[]) => {
+      const appealing = await scoreAppeal(batch);
+      appealingAsins.push(...appealing);
+      newItemsCount += batch.length;
+    },
     batchSize: config.aiBatchSize,
   });
   await saveLastTabCounts(tabCounts);

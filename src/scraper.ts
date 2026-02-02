@@ -521,25 +521,33 @@ export async function getSubcategories(page: Page): Promise<SubcategoryNode[]> {
     return list;
 }
 
+/** Options for collectUnseenItemsInTab and collectUnseenItemsSmart. */
+export interface CollectUnseenItemsOptions {
+    page: Page;
+    tab: VineTabId;
+    totalCount: number;
+    maxItemsForTab?: number;
+    getSeenAsins?: (desired: string[]) => Promise<Set<string>>;
+    /** Called when a page (or chunk) of unseen items is ready; ties into runScraper batching. */
+    onPageProcessed?: (items: VineItem[]) => void | Promise<void>;
+}
+
 /**
  * Smart collection for Additional items: open category filter, get top-level categories
  * (shuffled), then for each category get subcategories and use AI to pick which to scrape.
  * Only scrapes those subcategories (or the parent if none match). Falls back to
- * collectAllItemsInTab if the filter container is not present.
+ * collectUnseenItemsInTab if the filter container is not present.
  * Returns items plus pending category updates; caller commits after notification.
  */
 async function collectUnseenItemsSmart(
-    page: Page,
-    tab: VineTabId,
-    totalCount: number,
-    maxItemsForTab: number | undefined,
-    getSeenAsins?: (desired: string[]) => Promise<Set<string>>
+    options: CollectUnseenItemsOptions
 ): Promise<{
     unseenItems: Record<string, VineItem>;
     pendingCategoryUpdates: PendingCategoryUpdate[];
     seenCategoryKeys: Set<string>;
     visitedCategoryIds: Set<string>;
 }> {
+    const { page, tab, totalCount, maxItemsForTab, getSeenAsins, onPageProcessed } = options;
     const tabLabel = tab.charAt(0).toUpperCase() + tab.slice(1);
     await delayAfterTabSwitch();
     const hasFilter = await page.$(VVP_BROWSE_NODES).then((el) => !!el);
@@ -547,13 +555,7 @@ async function collectUnseenItemsSmart(
         console.log(
             `[${tabLabel}] No category filter found; scraping entire tab.`
         );
-        const unseenItems = await collectUnseenItemsInTab(
-            page,
-            tab,
-            totalCount,
-            maxItemsForTab,
-            getSeenAsins
-        );
+        const unseenItems = await collectUnseenItemsInTab(options);
         return {
             unseenItems,
             pendingCategoryUpdates: [],
@@ -567,13 +569,7 @@ async function collectUnseenItemsSmart(
         console.log(
             `[${tabLabel}] No top-level categories in filter; scraping entire tab.`
         );
-        const unseenItems = await collectUnseenItemsInTab(
-            page,
-            tab,
-            totalCount,
-            maxItemsForTab,
-            getSeenAsins
-        );
+        const unseenItems = await collectUnseenItemsInTab(options);
         return {
             unseenItems,
             pendingCategoryUpdates: [],
@@ -663,13 +659,11 @@ async function collectUnseenItemsSmart(
                 maxItemsForTab != null
                     ? Math.max(0, maxItemsForTab - unseenCount)
                     : undefined;
-            const newItems = await collectUnseenItemsInTab(
-                page,
-                tab,
-                count,
-                budget,
-                getSeenAsins
-            );
+            const newItems = await collectUnseenItemsInTab({
+                ...options,
+                totalCount: count,
+                maxItemsForTab: budget,
+            });
             unseenItems = { ...unseenItems, ...newItems };
 
             pendingCategoryUpdates.push({
@@ -726,13 +720,11 @@ async function collectUnseenItemsSmart(
                 maxItemsForTab != null
                     ? Math.max(0, maxItemsForTab - unseenCount)
                     : undefined;
-            const newItems = await collectUnseenItemsInTab(
-                page,
-                tab,
-                count,
-                budget,
-                getSeenAsins
-            );
+            const newItems = await collectUnseenItemsInTab({
+                ...options,
+                totalCount: count,
+                maxItemsForTab: budget,
+            });
             unseenItems = { ...unseenItems, ...newItems };
 
             pendingCategoryUpdates.push({
@@ -757,14 +749,11 @@ async function collectUnseenItemsSmart(
     };
 }
 
-/** Paginate through current tab and collect all items. Dedupes by ASIN (first wins). Stops when a page has no unseen items (per getSeenAsins) or when maxItemsForTab reached. Returns items keyed by ASIN (uppercase) and the subset of ASINs that are unseen (per getSeenAsins). */
+/** Paginate through current tab and collect all items. Dedupes by ASIN (first wins). Stops when a page has no unseen items (per getSeenAsins) or when maxItemsForTab reached. Calls onPageProcessed with unseen items from each page. Returns items keyed by ASIN (uppercase). */
 async function collectUnseenItemsInTab(
-    page: Page,
-    tab: VineTabId,
-    totalCount: number,
-    maxItemsForTab?: number,
-    getSeenAsins?: (desired: string[]) => Promise<Set<string>>
+    options: CollectUnseenItemsOptions
 ): Promise<Record<string, VineItem>> {
+    const { page, tab, totalCount, maxItemsForTab, getSeenAsins, onPageProcessed } = options;
     let allItemsByAsin: Record<string, VineItem> = {};
 
     const maxFromPagination = await getMaxPageFromPagination(page);
@@ -821,6 +810,10 @@ async function collectUnseenItemsInTab(
         allItemsByAsin = { ...allItemsByAsin, ...pageItems };
         const unseenAsinCount = Object.keys(pageItems).length;
 
+        if (onPageProcessed != null && unseenAsinCount > 0) {
+            await onPageProcessed(Object.values(pageItems));
+        }
+
         if (unseenAsinCount === 0) {
             console.log(
                 `[pagination] Tab "${tab}": no more pages (all items already seen, escape).`
@@ -853,10 +846,6 @@ export interface ScraperResult {
     pendingCategoryUpdates?: PendingCategoryUpdate[];
     seenCategoryKeys?: Set<string>;
     visitedCategoryIds?: Set<string>;
-    /** ASINs returned by onBatchProcessed during the run (only if onBatchProcessed was provided). */
-    appealingAsins?: string[];
-    /** Number of new (previously unseen) items queued for onBatchProcessed (only if onBatchProcessed was provided). */
-    newItemsCount?: number;
 }
 
 export interface ScraperOptions {
@@ -865,7 +854,7 @@ export interface ScraperOptions {
     /** Optional: return the subset of desired ASINs that have been seen (e.g. in DB). Used for pagination escape when all items on a page are seen. */
     getSeenAsins?: (desired: string[]) => Promise<Set<string>>;
     /** Optional: called when a batch of new items is loaded (and at the end if any remain in the queue). Receives the batch; may return appealing ASINs to accumulate. */
-    onBatchProcessed?: (items: VineItem[]) => Promise<string[]>;
+    onBatchProcessed?: (items: VineItem[]) => Promise<void>;
     /** Batch size for onBatchProcessed (only used when onBatchProcessed is set). New items are queued and sent in batches of this size. */
     batchSize?: number;
 }
@@ -885,10 +874,23 @@ export async function runScraper(
         onBatchProcessed != null && batchSizeOpt != null && batchSizeOpt > 0
             ? batchSizeOpt
             : 0;
-    const appealingAsins: string[] = [];
     const pendingNewItems: VineItem[] = [];
     let totalNewQueued = 0;
     const maxNewToScore = maxItemsForRun;
+
+    const onPageProcessed =
+        onBatchProcessed != null && batchSize > 0
+            ? async (items: VineItem[]) => {
+                  const remaining = Math.max(0, maxNewToScore - totalNewQueued);
+                  const toQueue = items.slice(0, remaining);
+                  totalNewQueued += toQueue.length;
+                  pendingNewItems.push(...toQueue);
+                  while (pendingNewItems.length >= batchSize) {
+                      const batch = pendingNewItems.splice(0, batchSize);
+                      await onBatchProcessed(batch);
+                  }
+              }
+            : undefined;
 
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
@@ -969,43 +971,23 @@ export async function runScraper(
                     seenCategoryKeys: Set<string>;
                     visitedCategoryIds: Set<string>;
                 } | null = null;
+                const collectOptions: CollectUnseenItemsOptions = {
+                    page,
+                    tab,
+                    totalCount: count,
+                    maxItemsForTab: maxItemsThisTab,
+                    getSeenAsins,
+                    onPageProcessed,
+                };
                 const tabUnseenItems =
                     tab === "recommended"
-                        ? await collectUnseenItemsInTab(
-                              page,
-                              tab,
-                              count,
-                              maxItemsThisTab,
-                              getSeenAsins
-                          )
+                        ? await collectUnseenItemsInTab(collectOptions)
                         : ((smartResult = await collectUnseenItemsSmart(
-                              page,
-                              tab,
-                              count,
-                              maxItemsThisTab,
-                              getSeenAsins
+                              collectOptions
                           )),
                           smartResult.unseenItems);
                 itemsByTab[tab] = tabUnseenItems;
                 allItemsByAsin = { ...allItemsByAsin, ...tabUnseenItems };
-
-                if (onBatchProcessed != null && batchSize > 0) {
-                    const remaining = Math.max(
-                        0,
-                        maxNewToScore - totalNewQueued
-                    );
-                    const toQueue = Object.keys(tabUnseenItems)
-                        .slice(0, remaining)
-                        .map((a) => tabUnseenItems[a])
-                        .filter((it): it is VineItem => it != null);
-                    totalNewQueued += toQueue.length;
-                    pendingNewItems.push(...toQueue);
-                    while (pendingNewItems.length >= batchSize) {
-                        const batch = pendingNewItems.splice(0, batchSize);
-                        const batchAppealing = await onBatchProcessed(batch);
-                        appealingAsins.push(...batchAppealing);
-                    }
-                }
 
                 if (smartResult) {
                     pendingCategoryUpdates.push(
@@ -1019,6 +1001,10 @@ export async function runScraper(
             }
         }
 
+        if (onBatchProcessed != null && pendingNewItems.length > 0) {
+            await onBatchProcessed(pendingNewItems);
+        }
+
         return {
             tabCounts,
             itemsByTab,
@@ -1026,9 +1012,6 @@ export async function runScraper(
             pendingCategoryUpdates,
             seenCategoryKeys,
             visitedCategoryIds,
-            ...(onBatchProcessed != null && batchSize > 0
-                ? { appealingAsins, newItemsCount: totalNewQueued }
-                : {}),
         };
     } finally {
         await page.close();
