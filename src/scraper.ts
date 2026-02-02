@@ -848,7 +848,7 @@ export interface ScraperResult {
     /** Items per tab, keyed by ASIN (uppercase). */
     itemsByTab: Record<VineTabId, Record<string, VineItem>>;
     /** All items from this scan, keyed by ASIN (uppercase). One entry per ASIN. */
-    allItems: Record<string, VineItem>;
+    unseenItems: Record<string, VineItem>;
     /** Commit only after notification is sent (Additional tab smart flow). */
     pendingCategoryUpdates?: PendingCategoryUpdate[];
     seenCategoryKeys?: Set<string>;
@@ -1022,7 +1022,7 @@ export async function runScraper(
         return {
             tabCounts,
             itemsByTab,
-            allItems: allItemsByAsin,
+            unseenItems: allItemsByAsin,
             pendingCategoryUpdates,
             seenCategoryKeys,
             visitedCategoryIds,

@@ -32,7 +32,7 @@ function anyCountIncreased(prev: TabCounts | null, curr: TabCounts): boolean {
 async function runFullScan(browser: puppeteer.Browser): Promise<void> {
   console.log("Running full Vine scan...");
   const getSeenAsins = (desired: string[]) => getSeenAsinsFromBatch(desired);
-  const { tabCounts, allItems, appealingAsins = [], newItemsCount = 0, pendingCategoryUpdates, seenCategoryKeys, visitedCategoryIds } = await runScraper(browser, {
+  const { tabCounts, unseenItems, appealingAsins = [], newItemsCount = 0, pendingCategoryUpdates, seenCategoryKeys, visitedCategoryIds } = await runScraper(browser, {
     maxItems: config.aiMaxItemsPerRun,
     getSeenAsins,
     onBatchProcessed: (batch: VineItem[]) => scoreAppeal(batch),
@@ -40,23 +40,17 @@ async function runFullScan(browser: puppeteer.Browser): Promise<void> {
   });
   await saveLastTabCounts(tabCounts);
 
-  const allItemsArr = Object.values(allItems);
-  if (allItemsArr.length === 0) {
-    console.log("No items found this scan.");
-    return;
-  }
-
-  if (newItemsCount === 0 && appealingAsins.length === 0) {
-    console.log("No new items; saving existing items and counts.");
-    await saveScanItems(allItemsArr, []);
+  const unseenItemsArr = Object.values(unseenItems);
+  if (unseenItemsArr.length === 0) {
+    console.log("No unseen items; skipping.");
     return;
   }
 
   const appealingItems = appealingAsins
-    .map((a) => allItems[String(a).toUpperCase().trim()])
+    .map((a) => unseenItems[String(a).toUpperCase().trim()])
     .filter((it): it is VineItem => it != null);
   const missingAsins = appealingAsins.filter(
-    (a) => !allItems[String(a).toUpperCase().trim()]
+    (a) => !unseenItems[String(a).toUpperCase().trim()]
   );
   if (missingAsins.length > 0) {
     console.warn(
@@ -71,7 +65,7 @@ async function runFullScan(browser: puppeteer.Browser): Promise<void> {
     await sendBatchedRecommendation(appealingItems);
   }
 
-  await saveScanItems(allItemsArr, appealingAsins);
+  await saveScanItems(unseenItemsArr, appealingAsins);
 
   if (pendingCategoryUpdates != null && seenCategoryKeys != null && visitedCategoryIds != null) {
     for (const u of pendingCategoryUpdates) {
